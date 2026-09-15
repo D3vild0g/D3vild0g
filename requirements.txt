@@ -1,0 +1,7 @@
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+statsmodels>=0.14
+scipy>=1.11
+requests>=2.31
+nfl_data_py>=0.3
