@@ -70,6 +70,32 @@ Then pull `get_graded_predictions("NFL")` and run it through
 `src.common.backtest.summarize()` to see real-world accuracy vs. the
 backtest numbers.
 
+## 5. Android app
+
+`android/` is a standalone native Kotlin app (no Python runtime on-device)
+that ships the same Elo + regression predictions offline. It reads bundled
+JSON snapshots (`android/app/src/main/assets/{nfl,nhl}_model.json`) —
+Elo ratings, recent-form windows, and fitted regression coefficients —
+and re-runs only the forward pass (sigmoid / linear / Poisson+Skellam) on
+device; no training happens on the phone.
+
+Regenerate the snapshots after pulling fresh data:
+
+```bash
+python -m src.nfl.ingest && python -m src.nhl.ingest
+python scripts/export_android_model.py
+```
+
+Then build the APK:
+
+```bash
+cd android && ./gradlew assembleDebug
+# -> android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Since the snapshot is static, predictions reflect team state as of export
+time — rebuild and reinstall to refresh it.
+
 ## Extending
 
 The model interfaces (`NFLModel.train()` / `.predict()`, same for NHL)
