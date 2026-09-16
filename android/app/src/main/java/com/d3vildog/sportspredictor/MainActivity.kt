@@ -1,19 +1,26 @@
 package com.d3vildog.sportspredictor
 
+import android.app.AlertDialog
+import android.content.Intent
 import android.os.Bundle
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.EditText
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import com.d3vildog.sportspredictor.databinding.ActivityMainBinding
-import org.json.JSONObject
-import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.format.DateTimeFormatter
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var nflModel: NflModel
-    private lateinit var nhlModel: NhlModel
-
+    private lateinit var adapter: GamesAdapter
     private val sports = listOf("NFL", "NHL")
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -21,85 +28,106 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        nflModel = NflModel(loadJsonAsset("nfl_model.json"))
-        nhlModel = NhlModel(loadJsonAsset("nhl_model.json"))
+        adapter = GamesAdapter { game -> openDetail(game) }
+        binding.gamesRecyclerView.adapter = adapter
+        binding.gamesRecyclerView.layoutManager = androidx.recyclerview.widget.LinearLayoutManager(this)
 
-        binding.sportSpinner.adapter = simpleAdapter(sports)
+        binding.sportSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, sports).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
         binding.sportSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                onSportChanged(sports[position])
+                loadGames(sports[position])
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
-        onSportChanged(sports[0])
 
-        binding.predictButton.setOnClickListener { runPrediction() }
+        binding.swipeRefresh.setOnRefreshListener { loadGames(sports[binding.sportSpinner.selectedItemPosition], forceRefresh = true) }
+        binding.settingsButton.setOnClickListener { showSettingsDialog() }
+
+        loadGames(sports[0])
     }
 
-    private fun onSportChanged(sport: String) {
-        val teams = if (sport == "NFL") nflModel.teams else nhlModel.teams
-        binding.homeSpinner.adapter = simpleAdapter(teams)
-        binding.awaySpinner.adapter = simpleAdapter(teams)
-        if (teams.size > 1) binding.awaySpinner.setSelection(1)
-        binding.restDaysRow.visibility = if (sport == "NFL") android.view.View.VISIBLE else android.view.View.GONE
-    }
-
-    private fun runPrediction() {
-        val sport = sports[binding.sportSpinner.selectedItemPosition]
-        val home = binding.homeSpinner.selectedItem as? String ?: return
-        val away = binding.awaySpinner.selectedItem as? String ?: return
-
-        if (home == away) {
-            binding.resultText.text = "Pick two different teams."
-            return
+    private fun openDetail(game: UpcomingGame) {
+        val intent = Intent(this, GameDetailActivity::class.java).apply {
+            putExtra("league", game.league)
+            putExtra("home", game.homeTeam)
+            putExtra("away", game.awayTeam)
+            putExtra("kickoff", game.kickoffLocal?.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME))
         }
+        startActivity(intent)
+    }
 
-        binding.resultText.text = if (sport == "NFL") {
-            val homeRest = binding.homeRestInput.text.toString().toIntOrNull() ?: 7
-            val awayRest = binding.awayRestInput.text.toString().toIntOrNull() ?: 7
-            formatNfl(nflModel.predict(home, away, homeRest, awayRest))
+    private fun loadGames(league: String, forceRefresh: Boolean = false) {
+        binding.statusText.text = "Loading upcoming $league games…"
+        lifecycleScope.launch {
+            try {
+                if (forceRefresh) clearScheduleCache(league)
+                val games = withContext(Dispatchers.IO) { fetchUpcoming(league) }
+                adapter.submit(games)
+                binding.statusText.text = if (games.isEmpty()) {
+                    "No upcoming $league games found."
+                } else {
+                    "${games.size} upcoming $league games · live schedule"
+                }
+            } catch (e: Exception) {
+                binding.statusText.text = "Couldn't load $league schedule: ${e.message}"
+            } finally {
+                binding.swipeRefresh.isRefreshing = false
+            }
+        }
+    }
+
+    private fun clearScheduleCache(league: String) {
+        val name = if (league == "NFL") "nfl_games.csv" else null
+        name?.let { java.io.File(cacheDir, it).delete() }
+    }
+
+    private suspend fun fetchUpcoming(league: String): List<UpcomingGame> {
+        return if (league == "NFL") {
+            val schedule = NflLiveData.loadSchedule(this)
+            NflLiveData.upcomingGames(schedule).map { g ->
+                val extra = buildString {
+                    if (g.spreadLine != null) append("Spread: ${g.homeTeam} ${if (g.spreadLine <= 0) g.spreadLine else "+${g.spreadLine}"}")
+                    if (g.totalLine != null) append(if (isNotEmpty()) " · O/U ${g.totalLine}" else "O/U ${g.totalLine}")
+                }
+                UpcomingGame("NFL", g.homeTeam, g.awayTeam, g.kickoffLocal, extra)
+            }
         } else {
-            formatNhl(nhlModel.predict(home, away))
+            val teams = listOf(
+                "ANA","ARI","BOS","BUF","CGY","CAR","CHI","COL","CBJ","DAL","DET","EDM","FLA","LAK","MIN",
+                "MTL","NSH","NJD","NYI","NYR","OTT","PHI","PIT","SJS","SEA","STL","TBL","TOR","UTA","VAN","VGK","WSH","WPG",
+            )
+            val nextGames = coroutineScope {
+                teams.map { team ->
+                    async(Dispatchers.IO) {
+                        try {
+                            NhlLiveData.nextGame(NhlLiveData.loadSchedule(this@MainActivity, team))
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                }.awaitAll()
+            }
+            val seen = HashSet<Long>()
+            nextGames.filterNotNull()
+                .filter { seen.add(it.gameId) }
+                .map { UpcomingGame("NHL", it.homeTeam, it.awayTeam, it.startsLocal(), it.venue) }
+                .sortedBy { it.kickoffLocal }
         }
     }
 
-    private fun formatNfl(r: NflModel.Result): String = buildString {
-        appendLine("${r.awayTeam} @ ${r.homeTeam}")
-        appendLine()
-        appendLine("${r.homeTeam} win prob: ${pct(r.homeWinProb)}")
-        appendLine("${r.awayTeam} win prob: ${pct(r.awayWinProb)}")
-        appendLine()
-        appendLine("Predicted margin (home - away): ${signed(r.predictedMarginHome)}")
-        appendLine()
-        appendLine("Elo: ${r.homeTeam} ${round1(r.homeElo)} vs ${r.awayTeam} ${round1(r.awayElo)}")
-    }
-
-    private fun formatNhl(r: NhlModel.Result): String = buildString {
-        appendLine("${r.awayTeam} @ ${r.homeTeam}")
-        appendLine()
-        appendLine("${r.homeTeam} win prob: ${pct(r.homeWinProb)}")
-        appendLine("${r.awayTeam} win prob: ${pct(r.awayWinProb)}")
-        appendLine()
-        appendLine(
-            "Predicted score: ${r.homeTeam} ${round2(r.predictedHomeGoals)} - " +
-                "${round2(r.predictedAwayGoals)} ${r.awayTeam}"
-        )
-        appendLine()
-        appendLine("Elo: ${r.homeTeam} ${round1(r.homeElo)} vs ${r.awayTeam} ${round1(r.awayElo)}")
-    }
-
-    private fun pct(v: Double) = String.format(Locale.US, "%.1f%%", v * 100)
-    private fun signed(v: Double) = String.format(Locale.US, "%+.1f", v)
-    private fun round1(v: Double) = String.format(Locale.US, "%.1f", v)
-    private fun round2(v: Double) = String.format(Locale.US, "%.2f", v)
-
-    private fun simpleAdapter(items: List<String>): ArrayAdapter<String> =
-        ArrayAdapter(this, android.R.layout.simple_spinner_item, items).apply {
-            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+    private fun showSettingsDialog() {
+        val input = EditText(this).apply {
+            hint = "https://your-backend.example.com"
+            setText(BettingSentimentClient.getBackendUrl(this@MainActivity))
         }
-
-    private fun loadJsonAsset(name: String): JSONObject {
-        val text = assets.open(name).bufferedReader().use { it.readText() }
-        return JSONObject(text)
+        AlertDialog.Builder(this)
+            .setTitle("NHL betting-sentiment backend URL")
+            .setMessage("Used only for NHL games (see server/README.md for how to deploy one). NFL betting lines are already built in.")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ -> BettingSentimentClient.setBackendUrl(this, input.text.toString()) }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 }

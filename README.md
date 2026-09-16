@@ -72,14 +72,32 @@ backtest numbers.
 
 ## 5. Android app
 
-`android/` is a standalone native Kotlin app (no Python runtime on-device)
-that ships the same Elo + regression predictions offline. It reads bundled
-JSON snapshots (`android/app/src/main/assets/{nfl,nhl}_model.json`) —
-Elo ratings, recent-form windows, and fitted regression coefficients —
-and re-runs only the forward pass (sigmoid / linear / Poisson+Skellam) on
-device; no training happens on the phone.
+`android/` is a standalone native Kotlin app (no Python runtime on-device).
+The win-probability *model* itself is a static snapshot — it reads bundled
+JSON (`android/app/src/main/assets/{nfl,nhl}_model.json`: Elo ratings,
+recent-form windows, fitted regression coefficients) and re-runs only the
+forward pass (sigmoid / linear / Poisson+Skellam) on device, no training
+on the phone. Everything else in the app — schedule, kickoff times,
+player stats, injuries, betting lines — is fetched live over the internet
+each time you open it, from the same free sources the Python ingest
+scripts use:
 
-Regenerate the snapshots after pulling fresh data:
+- **Schedule + kickoff times + real betting lines (NFL)**:
+  `http://www.habitatring.com/games.csv` — also has moneyline/spread/total,
+  so NFL betting info needs no backend or API key.
+- **Schedule + kickoff times (NHL)**: `api-web.nhle.com`.
+- **Player season stat leaders**: nflverse `player_stats` release (NFL),
+  `api-web.nhle.com` club-stats (NHL).
+- **Injury reports (NFL only)**: nflverse `injuries` release. There's no
+  free structured injury-report API for NHL.
+- **NHL betting sentiment / injury chatter**: NHL has no free structured
+  odds source either, so this one goes through a small backend
+  (`server/`) that does a real web search — see `server/README.md` to
+  deploy your own and point the app at it (Settings icon in the app).
+  Without a configured backend it just shows "not available" rather than
+  guessing.
+
+Regenerate the static model snapshots after pulling fresh training data:
 
 ```bash
 python -m src.nfl.ingest && python -m src.nhl.ingest
@@ -93,8 +111,11 @@ cd android && ./gradlew assembleDebug
 # -> android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Since the snapshot is static, predictions reflect team state as of export
-time — rebuild and reinstall to refresh it.
+Only the Elo/regression predictions reflect data as of the last export —
+schedule, lines, stats, and injuries are always live as of when you open
+the app (subject to each source's own update lag; nflverse's weekly
+player-stats release in particular can lag a week or two into a new
+season).
 
 ## Extending
 
