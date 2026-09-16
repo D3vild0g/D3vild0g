@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- habitatring.com (NFL schedule/odds CSV) only serves plain HTTP, no
+         valid HTTPS cert. Allow cleartext for just this host instead of
+         weakening the default HTTPS-only policy everywhere else. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">habitatring.com</domain>
+    </domain-config>
+</network-security-config>
